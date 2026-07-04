@@ -1,0 +1,5 @@
+﻿qq-botpy==1.2.1
+jmcomic==2.7.0
+python-dotenv>=1.0,<2
+aiohttp>=3.9,<4
+img2pdf>=0.5,<1
