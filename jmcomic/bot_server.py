@@ -267,7 +267,7 @@ class MyClient(botpy.Client):
             maxsize=MAX_QUEUE_SIZE
         )
         self._pending_requests: set[tuple[str, str]] = set()
-        self._user_last_request: dict[str, float] = {}
+        self._request_last_seen: dict[tuple[str, str], float] = {}
         self._worker_task: asyncio.Task[None] | None = None
         self._busy_notice_at = 0.0
 
@@ -347,11 +347,16 @@ class MyClient(botpy.Client):
         if request_key in self._pending_requests:
             return
 
-        last_request = self._user_last_request.get(member_openid, 0.0)
+        last_request = self._request_last_seen.get(request_key, 0.0)
         remaining = USER_COOLDOWN_SECONDS - (now - last_request)
         if remaining > 0:
-            # 冷却期内静默丢弃，避免用失败回复制造第二场消息洪水。
-            logger.info("忽略冷却期请求：user=%s, remaining=%.1fs", member_openid, remaining)
+            # 只限制同一用户重复请求同一个 JM 号，不影响不同 JM 号排队。
+            logger.info(
+                "忽略重复请求：user=%s, album=%s, remaining=%.1fs",
+                member_openid,
+                album_id,
+                remaining,
+            )
             return
 
         if self._request_queue.full():
@@ -361,7 +366,7 @@ class MyClient(botpy.Client):
                 await message.reply(content="当前请求过多，队列已满，请稍后再试。")
             return
 
-        self._user_last_request[member_openid] = now
+        self._request_last_seen[request_key] = now
         self._pending_requests.add(request_key)
         self._request_queue.put_nowait((message, album_id, member_openid))
         position = self._request_queue.qsize()
@@ -383,6 +388,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
