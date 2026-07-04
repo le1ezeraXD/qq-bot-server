@@ -4,7 +4,9 @@ import hashlib
 import logging
 import os
 import re
+import time
 from pathlib import Path
+from threading import Thread
 from typing import Any, Callable, TypeVar
 
 import aiohttp
@@ -12,10 +14,11 @@ import botpy
 from botpy.http import Route
 from botpy.message import GroupMessage
 from dotenv import load_dotenv
-from jmcomic import Feature, download_album
+from jmcomic import Feature, JmOption, download_album
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
+BUFFER_DIR = PROJECT_ROOT / "buffer"
 ENV_FILE = Path(__file__).with_name(".env")
 
 BASE64_FILE_LIMIT = 6 * 1024 * 1024
@@ -47,14 +50,19 @@ def extract_album_id(content: str) -> str | None:
 def download_jm(album_id: str) -> Path:
     """下载本子、导出 PDF，并返回 PDF 路径。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    BUFFER_DIR.mkdir(parents=True, exist_ok=True)
     pdf_path = OUTPUT_DIR / f"{album_id}.pdf"
 
     if pdf_path.is_file() and pdf_path.stat().st_size > 0:
         logger.info("复用已有 PDF：%s", pdf_path.name)
         return pdf_path
 
+    option = JmOption.construct(
+        {"dir_rule": {"base_dir": str(BUFFER_DIR)}}
+    )
     download_album(
         album_id,
+        option=option,
         extra=Feature.export_pdf(
             pdf_dir=str(OUTPUT_DIR),
             filename_rule="Aid",
@@ -113,7 +121,8 @@ async def run_in_daemon_thread(function: Callable[..., T], *args: Any) -> T:
             if not loop.is_closed():
                 loop.call_soon_threadsafe(future.set_result, result)
 
-    threading.Thread(target=runner, name="jmcomic-download", daemon=True).start()
+    worker = Thread(target=runner, name="jmcomic-download", daemon=True)
+    worker.start()
     return await future
 
 
@@ -366,6 +375,7 @@ def main() -> None:
         raise RuntimeError(f"缺少配置：{', '.join(missing)}。请复制 jmcomic/.env.example 为 jmcomic/.env 后填写。")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    BUFFER_DIR.mkdir(parents=True, exist_ok=True)
     intents = botpy.Intents(public_messages=True)
     client = MyClient(intents=intents)
     client.run(appid=APPID, secret=SECRET)
@@ -373,4 +383,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
 

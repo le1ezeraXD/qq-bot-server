@@ -25,6 +25,8 @@ env/
 # Runtime output
 output/*
 !output/.gitkeep
+buffer/*
+!buffer/.gitkeep
 *.log
 
 # IDE and OS
@@ -32,3 +34,5 @@ output/*
 .idea/
 .DS_Store
 Thumbs.db
+
+

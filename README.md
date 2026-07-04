@@ -5,7 +5,7 @@
 ## 功能
 
 - 从群聊消息中识别 `JM123456` 或纯数字格式
-- 下载并合成为 `output/{JM号}.pdf`
+- 原始图片临时存放在 `buffer/`，PDF 合并到 `output/{JM号}.pdf`
 - 自动复用已经生成的 PDF
 - 小文件使用 Base64 上传，大文件使用 QQ 原生分片上传
 - 同一 JM 号并发请求自动串行化
@@ -89,7 +89,8 @@ python jmcomic/bot_server.py
 - 小于等于 6 MiB：通过 QQ 富媒体 Base64 接口上传
 - 大于 6 MiB：通过 QQ 官方大文件分片接口上传
 - QQ 附件上限按当前平台能力设为 100 MB
-- 下载生成的 PDF 保存在 `output/`，该目录内容不会提交到 Git
+- 下载原图临时存放在 `buffer/`，合并成功后由 jmcomic 自动清理
+- 下载生成的 PDF 保存在 `output/`，两个运行目录的内容都不会提交到 Git
 
 ## 项目结构
 
@@ -99,6 +100,8 @@ python jmcomic/bot_server.py
 │   ├── .env.example
 │   ├── bot_server.py
 │   └── option.yml
+├── buffer/
+│   └── .gitkeep
 ├── output/
 │   └── .gitkeep
 ├── .gitignore
@@ -128,5 +131,7 @@ QQ 当前大附件能力最高为 100 MB。需要降低图片质量、拆分 PDF
 ## License
 
 MIT
+
+
 
 
