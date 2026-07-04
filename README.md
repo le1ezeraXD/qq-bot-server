@@ -15,8 +15,8 @@
 ## 环境要求
 
 - Python 3.11+
-- 已创建并配置的 QQ 官方机器人
-- QQ 群消息事件权限
+- 已按照[启动接入文档](https://bot.q.qq.com/wiki/develop/api-v2/)创建并配置 QQ 官方机器人
+- 已参考[事件订阅与通知文档](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html#事件订阅intents)启用 QQ 群消息事件权限（`GROUP_AND_C2C_EVENT`）
 
 ## 安装
 
@@ -113,3 +113,4 @@ QQ 当前大附件能力最高为 100 MB。需要降低图片质量、拆分 PDF
 ## License
 
 MIT
+
