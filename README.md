@@ -53,6 +53,10 @@ Copy-Item jmcomic/.env.example jmcomic/.env
 ```env
 QQ_BOT_APPID=你的机器人AppID
 QQ_BOT_SECRET=你的机器人AppSecret
+
+# 可选：请求队列最大等待数与单用户冷却秒数
+MAX_QUEUE_SIZE=5
+USER_COOLDOWN_SECONDS=60
 ```
 
 `.env` 已被 Git 忽略，请勿将密钥提交到仓库。
@@ -69,6 +73,17 @@ python jmcomic/bot_server.py
 @机器人 JM123456
 ```
 
+## 并发与防刷
+
+机器人使用单工作器请求队列，避免大量群消息同时创建下载线程：
+
+- 同一用户和 JM 号的重复排队请求会被忽略
+- 单用户默认有 60 秒请求冷却
+- 默认最多允许 5 个任务等待，队列满后拒绝新请求
+- 队列满时的群提示带有 15 秒节流，避免错误消息继续刷屏
+- 下载运行在守护线程中，按 `Ctrl+C` 时不会因同步下载而无法退出
+
+可通过 `.env` 调整 `MAX_QUEUE_SIZE` 和 `USER_COOLDOWN_SECONDS`。队列不宜设置过大，因为 QQ 群聊被动回复存在有效期。
 ## 文件上传说明
 
 - 小于等于 6 MiB：通过 QQ 富媒体 Base64 接口上传
@@ -113,4 +128,5 @@ QQ 当前大附件能力最高为 100 MB。需要降低图片质量、拆分 PDF
 ## License
 
 MIT
+
 

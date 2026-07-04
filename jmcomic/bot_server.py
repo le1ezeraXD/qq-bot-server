@@ -5,7 +5,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import aiohttp
 import botpy
@@ -22,6 +22,10 @@ BASE64_FILE_LIMIT = 6 * 1024 * 1024
 MAX_FILE_SIZE = 100 * 1024 * 1024
 MD5_10M_SIZE = 10_002_432
 UPLOAD_RETRIES = 3
+MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "5"))
+USER_COOLDOWN_SECONDS = int(os.getenv("USER_COOLDOWN_SECONDS", "60"))
+
+T = TypeVar("T")
 
 load_dotenv(ENV_FILE)
 APPID = os.getenv("QQ_BOT_APPID")
@@ -92,6 +96,25 @@ def read_file_chunk(path: Path, offset: int, length: int) -> bytes:
     with path.open("rb") as file:
         file.seek(offset)
         return file.read(length)
+
+
+async def run_in_daemon_thread(function: Callable[..., T], *args: Any) -> T:
+    """在线程中执行阻塞下载，但不让线程阻止进程退出。"""
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[T] = loop.create_future()
+
+    def runner() -> None:
+        try:
+            result = function(*args)
+        except BaseException as exc:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(future.set_exception, exc)
+        else:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(future.set_result, result)
+
+    threading.Thread(target=runner, name="jmcomic-download", daemon=True).start()
+    return await future
 
 
 async def put_part(session: aiohttp.ClientSession, url: str, data: bytes, index: int) -> None:
@@ -231,13 +254,64 @@ async def upload_group_pdf(message: GroupMessage, pdf_path: Path) -> dict[str, A
 class MyClient(botpy.Client):
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
-        self._album_locks: dict[str, asyncio.Lock] = {}
+        self._request_queue: asyncio.Queue[tuple[GroupMessage, str, str]] = asyncio.Queue(
+            maxsize=MAX_QUEUE_SIZE
+        )
+        self._pending_requests: set[tuple[str, str]] = set()
+        self._user_last_request: dict[str, float] = {}
+        self._worker_task: asyncio.Task[None] | None = None
+        self._busy_notice_at = 0.0
 
-    async def get_album_pdf(self, album_id: str) -> Path:
-        """避免同一 JM 号被多人同时下载和合并。"""
-        lock = self._album_locks.setdefault(album_id, asyncio.Lock())
-        async with lock:
-            return await asyncio.to_thread(download_jm, album_id)
+    def ensure_worker_started(self) -> None:
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(
+                self._request_worker(),
+                name="jmcomic-request-worker",
+            )
+
+    async def _request_worker(self) -> None:
+        logger.info("请求队列工作器已启动，最大等待数：%s", MAX_QUEUE_SIZE)
+        while True:
+            message, album_id, member_openid = await self._request_queue.get()
+            request_key = (member_openid, album_id)
+            try:
+                await self._process_request(message, album_id, member_openid)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("处理 JM%s 失败", album_id)
+                try:
+                    await message.reply(
+                        content=f"JM{album_id} 处理失败，请稍后重试。",
+                        msg_seq=4,
+                    )
+                except Exception:
+                    logger.exception("向群聊发送失败通知时发生异常")
+            finally:
+                self._pending_requests.discard(request_key)
+                self._request_queue.task_done()
+
+    async def _process_request(
+        self,
+        message: GroupMessage,
+        album_id: str,
+        member_openid: str,
+    ) -> None:
+        pdf_path = await run_in_daemon_thread(download_jm, album_id)
+        media = await upload_group_pdf(message, pdf_path)
+
+        await message.reply(
+            msg_type=7,
+            content="",
+            media={"file_info": media["file_info"]},
+            msg_seq=2,
+        )
+
+        mention = f"<@{member_openid}>" if member_openid else ""
+        await message.reply(
+            content=f"{mention} 你的文件已下载好".strip(),
+            msg_seq=3,
+        )
 
     async def on_group_at_message_create(self, message: GroupMessage):
         content = message.content.strip()
@@ -256,34 +330,35 @@ class MyClient(botpy.Client):
             await message.reply(content="没有识别到 JM 号，请发送例如：JM123456")
             return
 
-        try:
-            await message.reply(content=f"收到 JM{album_id}，正在处理……")
-            pdf_path = await self.get_album_pdf(album_id)
-            media = await upload_group_pdf(message, pdf_path)
+        self.ensure_worker_started()
+        member_openid = message.author.member_openid or "unknown"
+        request_key = (member_openid, album_id)
+        now = time.monotonic()
 
-            await message.reply(
-                msg_type=7,
-                content="",
-                media={"file_info": media["file_info"]},
-                msg_seq=2,
-            )
+        if request_key in self._pending_requests:
+            return
 
-            member_openid = message.author.member_openid
-            mention = f"<@{member_openid}>" if member_openid else ""
-            await message.reply(
-                content=f"{mention} 你的文件已下载好".strip(),
-                msg_seq=3,
-            )
-        except Exception as exc:
-            logger.exception("处理 JM%s 失败", album_id)
-            try:
-                await message.reply(
-                    content=f"JM{album_id} 处理失败，请稍后重试。",
-                    msg_seq=4,
-                )
-            except Exception:
-                logger.exception("向群聊发送失败通知时发生异常")
+        last_request = self._user_last_request.get(member_openid, 0.0)
+        remaining = USER_COOLDOWN_SECONDS - (now - last_request)
+        if remaining > 0:
+            # 冷却期内静默丢弃，避免用失败回复制造第二场消息洪水。
+            logger.info("忽略冷却期请求：user=%s, remaining=%.1fs", member_openid, remaining)
+            return
 
+        if self._request_queue.full():
+            # 全群最多每 15 秒提示一次繁忙，其余请求静默拒绝。
+            if now - self._busy_notice_at >= 15:
+                self._busy_notice_at = now
+                await message.reply(content="当前请求过多，队列已满，请稍后再试。")
+            return
+
+        self._user_last_request[member_openid] = now
+        self._pending_requests.add(request_key)
+        self._request_queue.put_nowait((message, album_id, member_openid))
+        position = self._request_queue.qsize()
+        await message.reply(
+            content=f"JM{album_id} 已加入队列，当前排队位置：{position}/{MAX_QUEUE_SIZE}"
+        )
 
 def main() -> None:
     missing = [name for name, value in {"QQ_BOT_APPID": APPID, "QQ_BOT_SECRET": SECRET}.items() if not value]
@@ -298,3 +373,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
